@@ -18,7 +18,10 @@ Project structure for Agentlab based on modern Python standards.
 ```bash
 pip install fastapi uvicorn
 pip install -e .
-uvicorn agentlab.app:app --reload --port 8000
+# 启动fastapi服务，--reload 表示热更新，--port 指定端口
+uvicorn agentlab.app:app --reload --port 8000  
+# 启动sse事件，可以看到事件流
+curl.exe -N http://127.0.0.1:8000/session/test/events
 
 ## Day 1 验收标准（你对照打勾）
 - [√] `uvicorn agentlab.app:app --reload` 启动无报错  

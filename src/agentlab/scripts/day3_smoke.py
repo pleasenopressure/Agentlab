@@ -2,8 +2,6 @@ import asyncio
 import agentlab.config  # noqa: F401
 from agentlab.models.mock_client import MockLLMClient
 from agentlab.models.gemini_genai import GeminiGenAIClient
-from dotenv import load_dotenv
-load_dotenv()
 
 messages = [
     {"role": "system", "content": "You are a helpful assistant. Answer in Chinese."},

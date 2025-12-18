@@ -1,4 +1,4 @@
-from typing import TypedDict, Any, Optional
+from typing import TypedDict, Any, Optional, Literal
 Role = Literal["system", "user", "assistant", "tool"]
 
 class AgentConfig(TypedDict):

@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn[standard]",
     "python-dotenv>=1.0.0",
     "google-genai",
+    "sse-starlette",
 ]
 
 [build-system]
