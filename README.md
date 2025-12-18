@@ -39,3 +39,13 @@ uvicorn agentlab.app:app --reload --port 8000
 
 3) **Windows 激活脚本权限**（PowerShell）  
    - 解决：用管理员 PowerShell 执行一次：`Set-ExecutionPolicy RemoteSigned`
+
+## notes
+gemini_genai.py generate函数中我在异步接口里用 asyncio.to_thread 把第三方同步阻塞 SDK 的调用 offload 到线程池执行，从而避免阻塞 event loop，保证 FastAPI 同时处理多个会话、SSE/WS 推送、取消请求等实时性
+如果外部取消了这个协程（例如 task.cancel()）：
+- 协程会收到 CancelledError
+- 但线程里的 _call() 通常还会继续跑到结束（因为普通线程函数无法被 asyncio 强制杀掉）
+- 当线程不断创建就会出问题，线程池耗尽
+- 解决：加 timeout，防止线程无限卡住
+- 改为return await asyncio.wait_for(asyncio.to_thread(_call), timeout=30)
+
