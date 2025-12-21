@@ -1,4 +1,4 @@
-Day 3:
+# Day 3:
 下面是你 **Day3（模型接入层：Gemini API）** 这一天真正学到/落地的知识点总结（按 JD 关键词对齐，都是你今天已经“写进代码、跑通终端”的）。
 
 ---
@@ -125,3 +125,115 @@ Gemini 的 streaming 接口在 Python SDK 里是**同步迭代**（阻塞式 `fo
 ---
 
 如果你愿意，我可以把 Day3 的内容整理成一段**简历可写点 + README 小节**（非常短但很“工程味”），直接复制进你的项目文档里。
+
+# Day 4
+事件流（Event Stream）的概念与用途
+你把一次任务运行过程拆成连续事件（run_start / llm_start / llm_delta / llm_done / run_done），实现“运行过程直播”，而不是只拿最终结果。
+
+SSE（Server-Sent Events）如何把事件流推给客户端
+你用 GET /session/{id}/events 建立长连接，后端通过 yield 持续推送事件；客户端用 curl.exe -N 就能实时看到输出。
+
+生产者-消费者模型在异步系统里的落地
+后台任务是“生产者”不断 publish(event)；SSE 订阅端是“消费者”不断 subscribe() + q.get()，这就是典型的 asyncio Queue 模式。
+
+EventBus 的最小实现（按 session 隔离）
+events.py 用 session_id -> asyncio.Queue 把不同会话的事件分开，避免串线；publish 负责入队，subscribe 负责持续出队。
+
+把 LLM 的流式输出接入你自己的 Runtime
+你成功实现了：Gemini 的 streaming chunk → 你自己的 llm_delta 事件 → SSE 推送 → 终端实时显示，等价于“打字机效果”。
+
+用 TaskManager 的取消机制实现 mid-stream cancel（steering 基础）
+你把 token.checkpoint() 放在流式循环内，实现“边生成边检查取消”；这样 /cancel 能尽快停止任务，并在事件流里体现为 cancel_requested / cancelled。
+
+SSE 心跳（ping）是什么
+你看到 : ping - ... 这种行，理解它是保持连接的心跳注释，不是业务事件，不影响你的数据流。
+
+模型输出不稳定（语言漂移）是“提示工程/约束”的问题，不是流式问题
+你观察到“要求中文但输出韩文”，学会定位：事件流链路是对的，问题在模型遵循指令的不确定性；可以通过更强的用户侧约束/格式约束来提升稳定性。
+
+# Day5 — 工具体系（Tooling System）：Registry + Runner + 可观测 + 可取消
+
+> 目标：把“工具调用”从随手写函数，升级为 **可注册、可治理、可观测、可取消** 的子系统，为后续 ReAct / 多 Agent / MCP 打基础。
+
+---
+
+## 1. Day5 交付标准（Done Checklist）
+
+- [x] 工具注册中心 `ToolRegistry`：注册/获取/列出工具
+- [x] 工具描述 `ToolSpec`：name/description/input_schema/timeout/retry/is_async/func
+- [x] 工具执行器 `ToolRunner`：
+  - [x] 支持 sync/async 工具
+  - [x] 超时 `timeout`（`asyncio.wait_for`）
+  - [x] 重试 `retry`（指数退避 + jitter）
+  - [x] 用户中断（`token.checkpoint()`）
+  - [x] 事件流可观测（tool_start/tool_end/tool_error/tool_cancelled）
+- [x] API：
+  - [x] `GET /tools`：列出工具元数据
+  - [x] `POST /session/{id}/tool/{name}`：运行工具（后台 task）
+- [x] SSE 可见：订阅 `/session/{id}/events` 可实时看到工具执行过程
+
+---
+
+## 2. 为什么要做工具体系（Why Tooling System）
+
+### 2.1 如果没有工具体系，会怎样？
+- 工具调用散落在各处（`requests.get()`、`time.sleep()`、DB query…）
+- 无统一治理：超时、重试、异常格式、日志、取消都要每处手写
+- 无可观测：UI/调试只能“猜”卡在哪里
+- 无法让 LLM 稳定调用：LLM 需要 “工具清单 + 参数 schema + 统一返回格式”
+
+### 2.2 Day5 解决的核心痛点
+- **统一入口**：所有工具必须先注册
+- **统一执行**：所有工具都走 ToolRunner（timeout/retry/cancel/事件）
+- **统一观测**：每次工具运行都有 start/end/error 事件
+- **可扩展**：后面接 MCP、HTTP 工具、外部服务都能复用同一套 Runner
+
+---
+
+## 3. 总体架构（How it works）
+
+### 3.1 组件关系
+- `ToolRegistry`：存所有工具（name → ToolSpec）
+- `ToolSpec`：单个工具的“元数据 + 执行函数”
+- `ToolRunner`：负责“治理式执行”（timeout/retry/cancel + 事件上报）
+- `TaskManager`：负责后台任务生命周期、cancel、status
+- `EventBus`：负责事件流（SSE/WS）发布与订阅
+
+### 3.2 运行链路（以调用 calc 为例）
+1. `POST /session/test/tool/calc` → FastAPI 启动后台 job（`tm.start`）
+2. job 调用 `tool_runner.run(...)`
+3. ToolRunner：
+   - publish `tool_start`
+   - 执行工具（sync→to_thread / async→await）
+   - timeout / retry / cancel checkpoint
+   - publish `tool_end` 或 `tool_error`/`tool_cancelled`
+4. SSE 订阅端实时收到事件并展示
+
+---
+
+## 4. 关键设计点与代码要点（重点）
+
+### 4.1 `ToolSpec`：工具的“完整定义”
+包含：
+- `name/description`：给 LLM/UI 看
+- `input_schema`：参数结构（JSON schema 简化版）
+- `func`：实际执行函数
+- `is_async`：是否 async
+- `timeout_s`：超时治理
+- `retry`：重试策略（max_retries/backoff/jitter）
+
+> 设计意义：把“工具的能力描述”和“执行约束”绑定在一起，后续做 tool-call、eval、文档生成都很顺。
+
+---
+
+### 4.2 sync/async 工具的统一执行：`asyncio.to_thread`
+- async 工具：`await spec.func(args)`
+- sync 工具：`await asyncio.to_thread(spec.func, args)`
+
+> 核心意义：避免同步工具阻塞 event loop（否则 SSE/WS 会卡死、并发请求会卡死）。
+
+---
+
+### 4.3 超时治理：`asyncio.wait_for`
+```python
+result = await asyncio.wait_for(call, timeout=spec.timeout_s)

@@ -52,3 +52,11 @@ gemini_genai.py generate函数中我在异步接口里用 asyncio.to_thread 把�
 - 解决：加 timeout，防止线程无限卡住
 - 改为return await asyncio.wait_for(asyncio.to_thread(_call), timeout=30)
 
+
+## Day 5 踩坑 & 经验（Pitfalls）
+
+PowerShell 发送 JSON 建议用 Invoke-RestMethod + ConvertTo-Json，避免 curl 引号转义问题
+
+取消必须在执行路径中有 checkpoint，否则 cancel 没效果
+   
+sync 工具必须 to_thread，否则会阻塞 event loop（SSE/WS 会卡）

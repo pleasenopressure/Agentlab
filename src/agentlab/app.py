@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Body
 from sse_starlette.sse import EventSourceResponse
 
 from agentlab.config import settings
@@ -8,10 +8,21 @@ from agentlab.runtime.task_manager import TaskManager
 from agentlab.runtime.events import EventBus
 from agentlab.api_schemas import ChatRequest
 from agentlab.models.gemini_genai import GeminiGenAIClient
+from agentlab.tools.registry import ToolRegistry, ToolRunner, ToolError
+from agentlab.tools.builtins import register_builtin_tools
 
 app = FastAPI(title="AgentLab", version="0.1.0")
+# ✅ 新增：一个空的任务管理器对象，用于任务的启动和取消
 tm = TaskManager()
+# ✅ 新增：一个空的事件总线对象，用于事件的发布和订阅
 bus = EventBus()
+# ✅ 新增：一个空的工具注册中心对象
+tool_reg = ToolRegistry()
+# ✅ 新增：在工具注册中心注册一些内置工具
+register_builtin_tools(tool_reg)
+# ✅ 新增：一个空的工具运行器对象，用于工具的运行
+tool_runner = ToolRunner(tool_reg)
+
 
 @app.get("/")
 def root():
@@ -105,3 +116,37 @@ async def cancel(session_id: str):
 @app.get("/session/{session_id}/status")
 def status(session_id: str):
     return tm.get_status(session_id)
+
+@app.get("/tools")
+def list_tools():
+    return {
+        "tools": [
+            {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+                "timeout_s": t.timeout_s,
+                "max_retries": t.retry.max_retries,
+            }
+            for t in tool_reg.list()
+        ]
+    }
+
+@app.post("/session/{session_id}/tool/{tool_name}")
+async def call_tool(session_id: str, tool_name: str, args: dict = Body(default={})):
+    async def job(token):
+        try:
+            out = await tool_runner.run(
+                session_id=session_id,
+                tool_name=tool_name,
+                args=args,
+                token=token,
+                bus=bus,
+            )
+            await bus.publish(session_id, {"type": "tool_call_done", "tool": tool_name, "output": out})
+        except ToolError as e:
+            await bus.publish(session_id, {"type": "tool_call_failed", "tool": tool_name, "error": str(e)})
+            raise
+
+    r = tm.start(session_id, job)
+    return {"result": r}
