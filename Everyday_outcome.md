@@ -143,7 +143,7 @@ events.py 用 session_id -> asyncio.Queue 把不同会话的事件分开，避�
 你成功实现了：Gemini 的 streaming chunk → 你自己的 llm_delta 事件 → SSE 推送 → 终端实时显示，等价于“打字机效果”。
 
 用 TaskManager 的取消机制实现 mid-stream cancel（steering 基础）
-你把 token.checkpoint() 放在流式循环内，实现“边生成边检查取消”；这样 /cancel 能尽快停止任务，并在事件流里体现为 cancel_requested / cancelled。
+你把 token.checkpoint() 放在流式循环内，实现“边生成边检查取消”；这样 /cancel 能尽快停止任务，并在事件流里体现为 cancel_called / cancelled。
 
 SSE 心跳（ping）是什么
 你看到 : ping - ... 这种行，理解它是保持连接的心跳注释，不是业务事件，不影响你的数据流。

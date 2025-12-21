@@ -10,6 +10,7 @@ from agentlab.api_schemas import ChatRequest
 from agentlab.models.gemini_genai import GeminiGenAIClient
 from agentlab.tools.registry import ToolRegistry, ToolRunner, ToolError
 from agentlab.tools.builtins import register_builtin_tools
+from agentlab.orchestration.react_loop import run_react
 
 app = FastAPI(title="AgentLab", version="0.1.0")
 # ✅ 新增：一个空的任务管理器对象，用于任务的启动和取消
@@ -109,7 +110,7 @@ async def chat(session_id: str, req: ChatRequest):
 @app.post("/session/{session_id}/cancel")
 async def cancel(session_id: str):
     # 先告诉前端：已请求取消（UI 可立刻变 stop 状态）
-    await bus.publish(session_id, {"type": "cancel_requested"})
+    await bus.publish(session_id, {"type": "cancel_called"})
     r = tm.cancel(session_id)
     return {"result": r}
 
@@ -146,6 +147,39 @@ async def call_tool(session_id: str, tool_name: str, args: dict = Body(default={
             await bus.publish(session_id, {"type": "tool_call_done", "tool": tool_name, "output": out})
         except ToolError as e:
             await bus.publish(session_id, {"type": "tool_call_failed", "tool": tool_name, "error": str(e)})
+            raise
+
+    r = tm.start(session_id, job)
+    return {"result": r}
+@app.post("/session/{session_id}/react_chat")
+async def react_chat(session_id: str, req: ChatRequest):
+    async def job(token):
+        await bus.publish(session_id, {"type": "react_user_input", "prompt": req.prompt, "system": req.system})
+        await bus.publish(session_id, {"type": "run_start", "kind": "react_chat"})
+        try:
+            client = GeminiGenAIClient()
+
+            final_text = await run_react(
+                session_id=session_id,
+                llm=client,
+                registry=tool_reg,
+                runner=tool_runner,
+                bus=bus,
+                token=token,
+                user_prompt=req.prompt,
+                user_system=req.system,
+                max_steps=6,
+            )
+
+            # 把最终答案也通过事件流发出去（给 UI/终端显示）
+            await bus.publish(session_id, {"type": "final", "text": final_text})
+            await bus.publish(session_id, {"type": "run_done", "kind": "react_chat"})
+
+        except asyncio.CancelledError:
+            await bus.publish(session_id, {"type": "cancelled", "kind": "react_chat"})
+            raise
+        except Exception as e:
+            await bus.publish(session_id, {"type": "error", "kind": "react_chat", "error": str(e)})
             raise
 
     r = tm.start(session_id, job)
