@@ -237,3 +237,154 @@ SSE 心跳（ping）是什么
 ### 4.3 超时治理：`asyncio.wait_for`
 ```python
 result = await asyncio.wait_for(call, timeout=spec.timeout_s)
+
+
+## Day6 目标
+
+把 Day5 的工具体系真正接进 Agent 控制流，做出一个最小可用的 **ReAct 闭环**：
+
+> **LLM 规划（选择工具）→ 执行工具 → Observation 回灌 → LLM 输出最终答案**
+
+并且全程 **可观测（SSE 事件流）+ 可取消（TaskManager token）**。
+
+---
+
+## 你完成的核心功能
+
+### 1) ReAct Loop（多步控制流）
+
+- 引入 `max_steps`（例如 6）防止模型死循环
+    
+- 每一步都有：
+    
+    - `react_step_start`
+        
+    - `react_model_raw`（模型原始输出）
+        
+    - （可能）工具调用与 observation
+        
+    - 直到 `final`
+        
+
+你跑通的例子非常典型：
+
+- Step1：模型输出 tool call JSON → 选择 `calc`
+    
+- Step2：模型输出 final JSON → 给出答案
+    
+---
+
+### 2) 动作协议（JSON action format）
+
+你没有直接用 Gemini 的原生 tool-calling，而是先用最稳定、可移植的 **JSON 协议**：
+
+- 工具调用：
+    
+    `{"type":"tool","tool_name":"calc","args":{"expression":"(19.5 + 2.3) * 4"}}`
+    
+- 最终回答：
+    
+    `{"type":"final","final":"87.2"}`
+    
+
+优点：
+
+- 任何模型都能用同一套 loop
+    
+- 易调试：解析失败可以直接看 `react_model_raw`
+    
+
+---
+
+### 3) 工具执行真正进入 agent loop
+
+当模型选择工具后，你把它交给 Day5 的 `ToolRunner` 执行：
+
+- `tool_start`
+    
+- `tool_end` / `tool_error`
+    
+- 结果变成 Observation，再喂回 LLM
+    
+
+你 SSE 中的关键证据：
+
+- `tool_start` → `tool_end`
+    
+- `react_observation`（里面带 `value: 87.2`）
+    
+
+---
+
+### 4) 观测性（Observability）完整闭环
+
+你通过 EventBus + SSE，把整个 ReAct 过程“直播”出来：
+
+- 模型的决策（`react_model_raw`）
+    
+- 工具的开始/结束（`tool_start/tool_end`）
+    
+- 回灌内容（`react_observation`）
+    
+- 最终输出（`final`）
+    
+
+这为后续 Studio/调试/评估奠定了基础。
+
+---
+
+### 5) 可中断（Cancellation / Steering 基础）
+
+你在循环关键点放了：
+
+- `await token.checkpoint()`
+    
+
+意味着：
+
+- 用户调用 `/cancel` 能在下一次 checkpoint 处中断 ReAct（包括工具执行前/下一步推理前）。
+    
+
+---
+
+## Day6 你踩到的关键坑与修复思路
+
+### 1) “为什么没看到模型输出？”
+
+你看到的模型输出主要以两种事件体现：
+
+- `react_model_raw`：模型原始 JSON 输出
+    
+- `final`：最终答案
+    
+
+因为 Day6 用的是 `llm.generate()`（一次性生成），还没有做 Day4 那种 `llm_delta` 流式输出。
+
+---
+
+### 2) “为什么我想调用 sleep，却调用了 calc？”
+
+你定位到了根因之一：**输入在客户端就乱码了**，导致模型无法理解“等待”意图。
+
+- Windows PowerShell 里 `Invoke-RestMethod -Body` 可能用非 UTF-8 编码发出字符串
+    
+- FastAPI 按 UTF-8 解码 JSON → 服务端收到的是乱码（你在 `react_user_input` 看到 `???`）
+    
+
+解决方法（你已经掌握方向）：
+
+- 用 UTF-8 字节发送 JSON（最稳）
+    
+- 或调整终端/脚本编码，确保请求体是 UTF-8
+    
+
+---
+
+## 你 Day6 最重要的“能力增长”
+
+- 你从“能流式输出”升级为“能做 agent 控制流”：  
+    **模型不只是回答，而是能“选择工具、执行工具、利用工具结果再回答”。**
+    
+- 你把工具执行从“函数调用”提升为“可治理动作”（timeout/retry/cancel/事件）。
+    
+- 你做出了一个可调试的 ReAct 原型：任何一步出问题都能在 SSE 里定位。

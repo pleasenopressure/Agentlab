@@ -11,6 +11,8 @@ from agentlab.models.gemini_genai import GeminiGenAIClient
 from agentlab.tools.registry import ToolRegistry, ToolRunner, ToolError
 from agentlab.tools.builtins import register_builtin_tools
 from agentlab.orchestration.react_loop import run_react
+import json
+import time
 
 app = FastAPI(title="AgentLab", version="0.1.0")
 # ✅ 新增：一个空的任务管理器对象，用于任务的启动和取消
@@ -38,7 +40,7 @@ def health():
 async def sse_events(session_id: str):
     async def gen():
         async for ev in bus.subscribe(session_id):
-            yield {"event": "runtime", "data": ev}
+            yield {"event": "runtime", "data": json.dumps(ev, ensure_ascii=False),"id": str(time.time_ns()),}
     return EventSourceResponse(gen())
 
 # ✅ 可选：WebSocket 推事件（你如果之后做 Studio 更方便）

@@ -89,6 +89,7 @@ async def run_react(
 
     await bus.publish(session_id, {"type": "react_start", "max_steps": max_steps})
 
+    observations: list[dict] = []
     for step in range(1, max_steps + 1):
         await token.checkpoint()
         await bus.publish(session_id, {"type": "react_step_start", "step": step})
@@ -131,19 +132,30 @@ async def run_react(
             except ToolError as e:
                 # 工具失败也作为 observation 回灌，让模型决定怎么办（或直接报错）
                 obs = {"ok": False, "error": str(e)}
+                observations.append(obs)
                 await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
                 messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
                 continue
 
             obs = {"ok": True, "tool": tool_name, "output": out}
+            observations.append(obs)
             await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
             messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
             continue
 
         if atype == "final":
-            final_text = action.get("final", "")
-            if not isinstance(final_text, str):
-                raise ValueError("final must be string")
+            # final_text = action.get("final", "")
+            # if not isinstance(final_text, str):
+            #     raise ValueError("final must be string")
+            final_text = await stream_final_answer(
+                session_id=session_id,
+                llm=llm,
+                bus=bus,
+                token=token,
+                user_prompt=user_prompt,
+                user_system=user_system,
+                observations=observations,
+            )
             await bus.publish(session_id, {"type": "react_done", "step": step})
             return final_text
 
@@ -151,3 +163,50 @@ async def run_react(
 
     # 超过步数仍未 final
     raise RuntimeError(f"ReAct exceeded max_steps={max_steps} without producing final answer.")
+
+async def stream_final_answer(
+    *,
+    session_id: str,
+    llm: Any,
+    bus: Any,
+    token: Any,
+    user_prompt: str,
+    user_system: Optional[str],
+    observations: List[Dict[str, Any]],
+) -> str:
+    """
+    用流式方式生成最终回答（产品体验）。
+    observations：ReAct 中累积的工具结果/关键事实
+    """
+    # 只取最后一次成功 observation（够用且简洁）
+    last_obs = observations[-1] if observations else {}
+
+    sys = (
+        "你是一个严谨的助手。请根据给定的用户问题和工具观测结果，输出最终回答。\n"
+        "要求：简洁、准确。\n"
+    )
+    if user_system:
+        sys += f"用户额外要求：{user_system.strip()}\n"
+
+    user = (
+        f"用户问题：{user_prompt}\n"
+        f"工具观测结果（JSON）：{json.dumps(last_obs, ensure_ascii=False)}\n"
+        "请给出最终回答："
+    )
+
+    messages = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": user},
+    ]
+
+    await bus.publish(session_id, {"type": "final_start"})
+
+    parts: list[str] = []
+    async for ch in llm.stream(messages):
+        await token.checkpoint()
+        parts.append(ch)
+        await bus.publish(session_id, {"type": "final_delta", "text": ch})
+
+    final_text = "".join(parts).strip()
+    await bus.publish(session_id, {"type": "final_done"})
+    return final_text
