@@ -7,7 +7,8 @@ from google.genai import types
 
 from agentlab.models.base import LLMClient
 from agentlab.types import Message
-
+import logging
+logger = logging.getLogger(__name__)
 
 class GeminiGenAIClient(LLMClient):
     """
@@ -88,7 +89,7 @@ class GeminiGenAIClient(LLMClient):
                         delay = base_delay * (2 ** attempt) + random.uniform(0, 0.25)
                         time.sleep(delay)
                         attempt += 1
-                        print(f"Gemini stream failed {attempt} times, retrying in {delay:.2f} seconds...")
+                        logger.info(f"Gemini stream failed {attempt} times, retrying in {delay:.2f} seconds...")
                         continue
                     q.put_nowait(("error", f"Gemini stream failed: {e!r}"))
                     return

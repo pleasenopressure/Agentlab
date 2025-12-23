@@ -20,13 +20,15 @@ from agentlab.observability.otel import setup_otel
 from opentelemetry import trace
 from opentelemetry import context as otel_context
 from opentelemetry.context import attach, detach
-
+import logging
+logger = logging.getLogger(__name__)
 setup_otel("agentlab")
 
-
+logger.info("Starting AgentLab...")
 
 app = FastAPI(title="AgentLab", version="0.1.0")
 FastAPIInstrumentor.instrument_app(app)
+tracer = trace.get_tracer(__name__)
 # ✅ 新增：一个空的任务管理器对象，用于任务的启动和取消
 tm = TaskManager()
 # ✅ 新增：一个空的事件总线对象，用于事件的发布和订阅
@@ -170,7 +172,7 @@ async def call_tool(session_id: str, tool_name: str, args: dict = Body(default={
 async def react_chat(session_id: str, req: ChatRequest):
     parent_ctx = otel_context.get_current()
     async def job(token):
-        print("JOB STARTED", session_id)
+        logger.info(f"JOB STARTED {session_id}")
         token_handle = attach(parent_ctx)
         try:
             with tracer.start_as_current_span("agent.run", attributes={"session_id": session_id, "kind": "react_chat"}):
