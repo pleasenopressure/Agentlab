@@ -5,6 +5,9 @@ import random
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from opentelemetry import trace
+tracer = trace.get_tracer(__name__)
+
 JsonDict = Dict[str, Any]
 ToolFunc = Callable[[JsonDict], Any]  # 支持 sync；async 用 is_async 标识
 
@@ -98,9 +101,12 @@ class ToolRunner:
             try:
                 attempt += 1
                 t0 = time.time()
-
-                # ✅ timeout：超时直接抛 TimeoutError
-                result = await asyncio.wait_for(self._call_func(spec, args), timeout=spec.timeout_s)
+                with tracer.start_as_current_span(
+                    "tool.run",
+                    attributes={"tool.name": tool_name, "session_id": session_id},
+                ):
+                    # ✅ timeout：超时直接抛 TimeoutError
+                    result = await asyncio.wait_for(self._call_func(spec, args), timeout=spec.timeout_s)
 
                 dur_ms = int((time.time() - t0) * 1000)
                 await bus.publish(session_id, {

@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from agentlab.types import Message
 from agentlab.tools.registry import ToolRunner, ToolRegistry, ToolError
+from opentelemetry import trace
+from agentlab.observability.otel import setup_otel
 
 # 代码使用这个正则在 AI 返回的一大段废话（比如：“好的，这是你要的JSON：
 # \njson\n{...}\n”）中，精准定位并抠出 {...} 这部分，以便后续用 json.loads 进行解析。
@@ -90,76 +92,82 @@ async def run_react(
     await bus.publish(session_id, {"type": "react_start", "max_steps": max_steps})
 
     observations: list[dict] = []
+
+    tracer = trace.get_tracer(__name__)
     for step in range(1, max_steps + 1):
         await token.checkpoint()
         await bus.publish(session_id, {"type": "react_step_start", "step": step})
 
-        raw = await llm.generate(messages)
-        await bus.publish(session_id, {"type": "react_model_raw", "step": step, "text": raw})
+        with tracer.start_as_current_span(
+            "react.step",
+            attributes={"session_id": session_id, "step": step},
+        ):
+            raw = await llm.generate(messages)
+            await bus.publish(session_id, {"type": "react_model_raw", "step": step, "text": raw})
 
-        # 把模型输出也加入上下文（assistant）
-        messages.append({"role": "assistant", "content": raw})
+            # 把模型输出也加入上下文（assistant）
+            messages.append({"role": "assistant", "content": raw})
 
-        try:
-            action = _extract_json(raw)
-        except Exception as e:
-            # 解析失败：发事件并终止
-            await bus.publish(session_id, {"type": "react_parse_error", "step": step, "error": str(e)})
-            raise
-
-        atype = action.get("type")
-
-        if atype == "tool":
-            tool_name = action.get("tool_name")
-            args = action.get("args", {})
-            if not isinstance(tool_name, str):
-                raise ValueError(f"tool_name must be string, got: {tool_name!r}")
-            if not isinstance(args, dict):
-                raise ValueError(f"args must be object, got: {args!r}")
-
-            await bus.publish(session_id, {"type": "react_tool_selected", "step": step, "tool": tool_name, "args": args})
-
-            # 执行工具（ToolRunner 内部会发 tool_start/tool_end/tool_error）
-            await token.checkpoint()
             try:
-                out = await runner.run(
-                    session_id=session_id,
-                    tool_name=tool_name,
-                    args=args,
-                    token=token,
-                    bus=bus,
-                )
-            except ToolError as e:
-                # 工具失败也作为 observation 回灌，让模型决定怎么办（或直接报错）
-                obs = {"ok": False, "error": str(e)}
+                action = _extract_json(raw)
+            except Exception as e:
+                # 解析失败：发事件并终止
+                await bus.publish(session_id, {"type": "react_parse_error", "step": step, "error": str(e)})
+                raise
+
+            atype = action.get("type")
+
+            if atype == "tool":
+                tool_name = action.get("tool_name")
+                args = action.get("args", {})
+                if not isinstance(tool_name, str):
+                    raise ValueError(f"tool_name must be string, got: {tool_name!r}")
+                if not isinstance(args, dict):
+                    raise ValueError(f"args must be object, got: {args!r}")
+
+                await bus.publish(session_id, {"type": "react_tool_selected", "step": step, "tool": tool_name, "args": args})
+
+                # 执行工具（ToolRunner 内部会发 tool_start/tool_end/tool_error）
+                await token.checkpoint()
+                try:
+                    out = await runner.run(
+                        session_id=session_id,
+                        tool_name=tool_name,
+                        args=args,
+                        token=token,
+                        bus=bus,
+                    )
+                except ToolError as e:
+                    # 工具失败也作为 observation 回灌，让模型决定怎么办（或直接报错）
+                    obs = {"ok": False, "error": str(e)}
+                    observations.append(obs)
+                    await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
+                    messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
+                    continue
+
+                obs = {"ok": True, "tool": tool_name, "output": out}
                 observations.append(obs)
                 await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
                 messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
                 continue
 
-            obs = {"ok": True, "tool": tool_name, "output": out}
-            observations.append(obs)
-            await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
-            messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
-            continue
+            if atype == "final":
+                # final_text = action.get("final", "")
+                # if not isinstance(final_text, str):
+                #     raise ValueError("final must be string")
+                final_text = await stream_final_answer(
+                    session_id=session_id,
+                    llm=llm,
+                    bus=bus,
+                    token=token,
+                    user_prompt=user_prompt,
+                    user_system=user_system,
+                    observations=observations,
+                )
+                await bus.publish(session_id, {"type": "react_done", "step": step})
+                return final_text
 
-        if atype == "final":
-            # final_text = action.get("final", "")
-            # if not isinstance(final_text, str):
-            #     raise ValueError("final must be string")
-            final_text = await stream_final_answer(
-                session_id=session_id,
-                llm=llm,
-                bus=bus,
-                token=token,
-                user_prompt=user_prompt,
-                user_system=user_system,
-                observations=observations,
-            )
-            await bus.publish(session_id, {"type": "react_done", "step": step})
-            return final_text
-
-        raise ValueError(f"Unknown action type: {atype!r}")
+            raise ValueError(f"Unknown action type: {atype!r}")
 
     # 超过步数仍未 final
     raise RuntimeError(f"ReAct exceeded max_steps={max_steps} without producing final answer.")
