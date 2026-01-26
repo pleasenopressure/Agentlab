@@ -21,6 +21,8 @@ from opentelemetry import trace
 from opentelemetry import context as otel_context
 from opentelemetry.context import attach, detach
 import logging
+from agentlab.runtime.storage import FileSessionStore
+
 logger = logging.getLogger(__name__)
 setup_otel("agentlab")
 
@@ -39,7 +41,8 @@ tool_reg = ToolRegistry()
 register_builtin_tools(tool_reg)
 # ✅ 新增：一个空的工具运行器对象，用于工具的运行
 tool_runner = ToolRunner(tool_reg)
-
+# ✅ 初始化存储
+session_store = FileSessionStore()
 
 @app.get("/")
 def root():
@@ -178,10 +181,12 @@ async def react_chat(session_id: str, req: ChatRequest):
             with tracer.start_as_current_span("agent.run", attributes={"session_id": session_id, "kind": "react_chat"}):
                 await bus.publish(session_id, {"type": "react_user_input", "prompt": req.prompt, "system": req.system})
                 await bus.publish(session_id, {"type": "run_start", "kind": "react_chat"})
+                history = session_store.load(session_id)
+                logger.info(f"Loaded history for {session_id}: {len(history)} messages")
                 try:
                     client = GeminiGenAIClient()
 
-                    final_text = await run_react(
+                    final_text, new_history = await run_react(
                         session_id=session_id,
                         llm=client,
                         registry=tool_reg,
@@ -190,9 +195,18 @@ async def react_chat(session_id: str, req: ChatRequest):
                         token=token,
                         user_prompt=req.prompt,
                         user_system=req.system,
+                        history=history,
                         max_steps=6,
                     )
-
+                    # ✅ 3. Save New History
+                    # 我们这里保存的是 run_react 返回的 new_history
+                    # 它已经包含了 (Old History + New User Prompt + CoT Steps + Final Answer)
+                    # ⚠️ 进阶优化：如果不想保存中间的 CoT (Thought/Observation)，可以在这里做过滤。
+                    # 但为了 Debug 和让 Agent 知道自己干过什么，Day 6 建议全存。
+                    
+                    # 过滤掉 system message 再存（因为 load 时我们会重新加最新的 system）
+                    msgs_to_save = [m for m in new_history if m["role"] != "system"]
+                    session_store.save(session_id, msgs_to_save)
                     # 把最终答案也通过事件流发出去（给 UI/终端显示）
                     await bus.publish(session_id, {"type": "final", "text": final_text})
                     await bus.publish(session_id, {"type": "run_done", "kind": "react_chat"})

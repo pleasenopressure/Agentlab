@@ -1,8 +1,7 @@
 from __future__ import annotations
 import json
 import re
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, List, Optional, Tuple
 from agentlab.types import Message
 from agentlab.tools.registry import ToolRunner, ToolRegistry, ToolError
 from opentelemetry import trace
@@ -71,8 +70,9 @@ async def run_react(
     token: Any,               # TaskManager token（有 checkpoint）
     user_prompt: str,
     user_system: Optional[str] = None,
+    history: Optional[List[Message]] = None,
     max_steps: int = 6,
-) -> str:
+) -> Tuple[str, List[Message]]:
     """
     最小 ReAct loop：
     - LLM 产出 action JSON
@@ -83,11 +83,22 @@ async def run_react(
     if user_system:
         # 用户 system 作为附加要求（如“用中文回答”）
         system_prompt = system_prompt + "\n用户额外要求：\n" + user_system.strip()
+    # 2. 组装 Messages
+    # System Prompt 总是放在最新的第一条（覆盖旧的 System Prompt，因为工具可能变了）
+    # History 里的非 System 消息保留
+    current_messages: List[Message] = [{"role": "system", "content": system_prompt}]
+    if history:
+        # 过滤掉历史里的 system message，避免重复或过时
+        # 我们只保留 user / assistant / tool 类型的消息
+        for m in history:
+            if m.get("role") != "system":
+                current_messages.append(m)
 
-    messages: List[Message] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+        # 追加当前用户的输入
+    current_messages.append({"role": "user", "content": user_prompt})
+
+
+
 
     await bus.publish(session_id, {"type": "react_start", "max_steps": max_steps})
 
@@ -102,11 +113,11 @@ async def run_react(
             "react.step",
             attributes={"session_id": session_id, "step": step},
         ):
-            raw = await llm.generate(messages)
+            raw = await llm.generate(current_messages)
             await bus.publish(session_id, {"type": "react_model_raw", "step": step, "text": raw})
 
             # 把模型输出也加入上下文（assistant）
-            messages.append({"role": "assistant", "content": raw})
+            current_messages.append({"role": "assistant", "content": raw})
 
             try:
                 action = _extract_json(raw)
@@ -142,13 +153,13 @@ async def run_react(
                     obs = {"ok": False, "error": str(e)}
                     observations.append(obs)
                     await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
-                    messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
+                    current_messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
                     continue
 
                 obs = {"ok": True, "tool": tool_name, "output": out}
                 observations.append(obs)
                 await bus.publish(session_id, {"type": "react_observation", "step": step, "observation": obs})
-                messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
+                current_messages.append({"role": "user", "content": f"Observation: {json.dumps(obs, ensure_ascii=False)}"})
                 continue
 
             if atype == "final":
@@ -162,10 +173,12 @@ async def run_react(
                     token=token,
                     user_prompt=user_prompt,
                     user_system=user_system,
+                    messages=current_messages,
                     observations=observations,
                 )
+                current_messages.append({"role": "assistant", "content": final_text})
                 await bus.publish(session_id, {"type": "react_done", "step": step})
-                return final_text
+                return final_text, current_messages
 
             raise ValueError(f"Unknown action type: {atype!r}")
 
@@ -180,15 +193,19 @@ async def stream_final_answer(
     token: Any,
     user_prompt: str,
     user_system: Optional[str],
+    messages: List[Message],
     observations: List[Dict[str, Any]],
 ) -> str:
     """
     用流式方式生成最终回答（产品体验）。
     observations：ReAct 中累积的工具结果/关键事实
+    复制一份消息列表，以免污染外部状态
+    我们需要在最后追加一条 System 指令，告诉模型“现在请基于上述对话生成最终回答”
+    或者直接把最后一条 User 消息改写（取决于你的 Prompt 策略，这里用追加最稳妥）
     """
     # 只取最后一次成功 observation（够用且简洁）
     last_obs = observations[-1] if observations else {}
-
+    streaming_messages = list(messages)
     sys = (
         "你是一个严谨的助手。请根据给定的用户问题和工具观测结果，输出最终回答。\n"
         "要求：简洁、准确。\n"
@@ -202,17 +219,14 @@ async def stream_final_answer(
         "请给出最终回答："
     )
 
-    messages = [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": user},
-    ]
 
     await bus.publish(session_id, {"type": "final_start"})
 
     parts: list[str] = []
-    async for ch in llm.stream(messages):
+    async for ch in llm.stream(streaming_messages):
         await token.checkpoint()
         parts.append(ch)
+        logger.info(f"final_delta: {ch}")
         await bus.publish(session_id, {"type": "final_delta", "text": ch})
 
     final_text = "".join(parts).strip()

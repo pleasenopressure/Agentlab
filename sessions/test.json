@@ -1,0 +1,50 @@
+[
+  {
+    "role": "user",
+    "content": "你好我的名字是jason"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"你好，Jason！很高兴认识你。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": "你好 Jason。"
+  },
+  {
+    "role": "user",
+    "content": "你知道我叫什么名字吗"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"是的，你告诉我你叫Jason。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": "我不知道您的名字。"
+  },
+  {
+    "role": "user",
+    "content": "你好我的名字是jason"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"你好，Jason！很高兴再次见到你。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "role": "user",
+    "content": "你知道我叫什么名字吗"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"是的，你叫Jason。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  }
+]
