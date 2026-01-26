@@ -1,0 +1,26 @@
+[
+  {
+    "role": "user",
+    "content": "你好我的名字是jason"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"你好 Jason，很高兴认识你！\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "role": "user",
+    "content": "你知道我叫什么名字吗"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"是的，你叫 Jason。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  }
+]

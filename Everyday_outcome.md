@@ -235,7 +235,7 @@ SSE 心跳（ping）是什么
 ---
 
 ### 4.3 超时治理：`asyncio.wait_for`
-```python
+
 result = await asyncio.wait_for(call, timeout=spec.timeout_s)
 
 
@@ -388,3 +388,332 @@ result = await asyncio.wait_for(call, timeout=spec.timeout_s)
 - 你把工具执行从“函数调用”提升为“可治理动作”（timeout/retry/cancel/事件）。
     
 - 你做出了一个可调试的 ReAct 原型：任何一步出问题都能在 SSE 里定位。
+
+# Day 8 — OpenTelemetry（OTel）可观测性接入与 Trace ↔ SSE 对齐（总结笔记）
+
+> 项目：AgentLab（FastAPI + SSE 事件流 + ReAct + Tools）  
+> 目标：把“请求 → agent.run → react.step → tool.run”这条链路做成可观测（Tracing），并把 **trace_id / span_id** 关联到 **SSE runtime events**，便于定位问题与性能分析。
+
+---
+
+## 1. Day 8 目标与范围
+
+本日聚焦 **Observability / OTel Tracing**：
+
+- 理解并掌握：Trace / Span / 埋点（Instrumentation）、Collector、可视化平台（Jaeger/Tempo/Langfuse/Arize 等）
+- 在项目中接入 OTel：给关键执行路径打 Span（HTTP、agent.run、react.step、tool.run）
+- 解决调试痛点：
+  - FastAPI 终端 trace 太“刷屏”
+  - SSE 里看不到 trace_id/span_id，无法对齐“事件”和“链路”
+- 产出：
+  - traces.jsonl（或 traces.json）文件落盘
+  - SSE 输出携带 trace_id/span_id
+  - 用 trace_id 抽取并打印树状结构的辅助脚本（trace_tree.py）
+
+---
+
+## 2. 本日遇到的主要问题（按发生顺序）
+
+### 2.1 终端 trace 输出太杂乱，难以阅读
+**现象**
+- FastAPI/uvicorn 终端输出大量 JSON（尤其 SSE 长连接 `/events`）
+- spans 中大量 `http.response.body` / `http send` 记录把关键业务 span 淹没
+
+**原因（关键点）**
+- `ConsoleSpanExporter()` 会把每个 span 直接打印到终端
+- SSE 是长连接，会持续 flush/心跳，触发非常多 asgi 事件 span
+
+**解决**
+- 把 exporter 从 Console 改为 **写文件 JSONL**（每行一个 span）
+- 后续可选：过滤掉 `/events` 路由产生的噪声 span（在 exporter 层过滤）
+
+---
+
+### 2.2 ImportError：cannot import name 'tracer'（otel.py 中没有 tracer）
+**现象**
+- `from agentlab.observability.otel import tracer` 报错：`ImportError: cannot import name 'tracer'`
+
+**原因**
+- `otel.py` 里只 `setup_otel()`，但没有显式 `tracer = trace.get_tracer(__name__)`
+- 代码在其它模块直接 import tracer，但 otel.py 没提供该符号
+
+**解决**
+- 在 `otel.py`（或 app.py）中补齐：
+  - `tracer = trace.get_tracer(__name__)`
+- 或统一改成在使用处调用：`trace.get_tracer(__name__)`（避免跨文件 import tracer 的耦合）
+
+---
+
+### 2.3 SSE 中看不到 trace_id/span_id（但 FastAPI 终端能看到）
+**现象**
+- FastAPI 终端能看到 OTel spans（trace_id/span_id）
+- SSE runtime events 却没有 `trace_id/span_id` 字段，无法对齐
+
+**原因**
+- OTel trace 是 span 体系；SSE runtime event 是业务事件 dict
+- 需要在发布事件时将 “当前活跃 span context” 附加到事件上
+
+**解决**
+- 在 `EventBus.publish()` 里对 event 做 `_attach_trace(event)`：
+  - `trace.get_current_span()` → 取 `trace_id/span_id` → 写进 event copy
+- 同时确认 **context 传播**：后台任务（TaskManager create_task）需要从请求上下文 attach 进去  
+  - 在 job 内使用 `attach(parent_ctx)` / `detach(token)`，让后台协程仍处于同一 trace
+
+客户端                  FastAPI(请求处理)                        后台任务(TaskManager)
+  |  POST /react_chat          |                                         |
+  |--------------------------->|                                         |
+  |                            | ① 进入 HTTP span(uvicorn/otel 自动)     |
+  |                            |    current_span = HTTP span             |
+  |                            |                                         |
+  |                            | ② parent_ctx = get_current()            |
+  |                            |    (把“当前上下文”保存下来)              |
+  |                            |                                         |
+  |                            | ③ tm.start(session_id, job)             |
+  |                            |---------------------------------------->|  (create_task)
+  |                            |                                         | ④ attach(parent_ctx)
+  |                            |                                         |    current_span 恢复为 HTTP span
+  |                            |                                         |    (关键：让后台也“继承”这条链路)
+  |                            |                                         |
+  |                            |                                         | ⑤ start agent.run span
+  |                            |                                         |    current_span = agent.run
+  |                            |                                         |
+  |                            |                                         | ⑥ bus.publish(event)
+  |                            |                                         |    _attach_trace() 读取 current_span
+  |                            |                                         |    → 把 trace_id/span_id 塞进 event
+  |                            |                                         |    → 进队列
+  |                            |                                         |
+  |                            |                                         | ⑦ SSE /events 订阅从队列取出 event
+  |                            |                                         |    → 推给 curl 终端
+  |                            |                                         |
+  |                            |                                         | ⑧ detach() 清理上下文
+  |                            |                                         |
+  |  200 {"result":"started"}  |                                         |
+  |<---------------------------|                                         |
+
+A. _attach_trace(event) 到底在做什么？
+
+它做的只有一件事：
+span = trace.get_current_span() —— 取当前上下文里的 span
+ctx = span.get_span_context() —— 取 span 的 trace_id/span_id
+把 trace_id/span_id 写进 event 的 copy 里，返回
+所以它依赖一个前提：调用 publish 的那一刻，当前上下文里必须有活跃 span。
+B. 为什么必须 attach(parent_ctx)？
+因为你是这样启动后台任务的：
+HTTP 请求进来 → FastAPI handler 在一个上下文里（有 HTTP span）
+tm.start() → asyncio.create_task() 创建后台任务（新的 Task）
+新的 Task 默认可能拿不到原来请求的上下文（尤其是你跨线程/跨 Task/使用 to_thread 等时更明显）。
+结果就是：
+你在后台 bus.publish() 时 trace.get_current_span() 可能是 无效 span
+_attach_trace() 读不到 trace_id/span_id → SSE 事件就不会带 id
+attach(parent_ctx) 的意义就是：
+把“请求时的上下文（含 trace 信息）”显式带到后台任务里，让后台任务继续属于同一条 trace。
+C. 为什么要 detach(token_handle)？
+attach() 像“把某个上下文压栈”，detach() 像“出栈恢复”。
+如果你不 detach：
+这个后台 Task 结束后可能还残留旧上下文
+下一个任务可能“串台”，trace 混乱（最难排查的那种）
+---
+
+### 2.4 SSE “只有 see_connection，没有后续事件” / logger 也看不到
+**现象**
+- `curl -N /session/test/events` 只能看到连接事件
+- `EventBus.publish()` 中的 `logger.info(...)` 不出现在 `agentlab.log`
+- `subscribe()` 的 “consumed” 日志也没有
+
+**原因（排查要点）**
+- 订阅 `/events` 本身不会产生业务事件；需要另一个终端触发 `POST /react_chat`
+- `subscribe()` 中 `logger.info` 写在 `yield` 后面，很多情况下不会执行到
+- `_attach_trace()` 可能在某些路径未 return（返回 None）导致队列中出现 None
+- logging 配置未把 `agentlab.events` logger 写入文件（或仍用 print、未使用 uvicorn log-config）
+
+1) yield 在生成器里到底做了什么？
+
+普通函数：return 一次性结束。
+
+生成器函数（有 yield）：每次执行到 yield：
+
+暂停函数
+
+把一个值“吐”给外面
+
+保存当前执行位置
+
+等外面“下一次要值”时，从 yield 的下一行继续跑
+
+异步生成器（async def ... + yield）同理，只是“下一次要值”发生在 async for 的下一轮。
+
+2) 用最小例子理解“yield 后面为什么可能不执行”
+def gen():
+    print("A")
+    yield 1
+    print("B")
+    yield 2
+    print("C")
+
+
+运行：
+
+g = gen()
+next(g)   # 打印 A，返回 1
+# 这时候 B 还没执行，因为函数暂停在 yield 1 那里
+
+next(g)   # 打印 B，返回 2
+next(g)   # 打印 C，然后 StopIteration
+
+
+结论：yield 后面的代码要等下一次 next() 才会执行。
+
+3) 迁移到你的 subscribe()（异步生成器）
+
+你现在的模式是：
+
+async def subscribe(self, session_id):
+    q = self.get_queue(session_id)
+    while True:
+        yield await q.get()
+        logger.info("consumed")
+
+
+这里发生了什么：
+
+ev = await q.get() 拿到事件
+
+yield ev 把事件交给 SSE 的 async for（EventSourceResponse）
+
+生成器暂停在 yield 这一行
+
+只有当 SSE 框架“继续拉下一条事件”（下一次循环）时，才会回到 logger.info("consumed")
+
+为什么很多时候你看不到这条 log？
+
+因为在 SSE 场景里，经常出现：
+
+客户端断开（curl 结束 / 网络断开）
+
+SSE 框架停止迭代（不再 async for）
+
+生成器被取消（CancelledError）
+
+这时生成器可能永远不会恢复到 yield 后面，所以 logger.info 就不会执行。
+
+4) 正确写法：把 log 放在 yield 之前（你想要“消费就记录”）
+
+你要表达的是：“我从队列取出来了，马上记录”，那就写成：
+
+async def subscribe(self, session_id):
+    q = self.get_queue(session_id)
+    while True:
+        ev = await q.get()
+        logger.info(f"consumed by subscriber: {session_id} ev={ev.get('type')}")
+        yield ev
+
+
+这样：
+
+只要取到了事件，就一定会 log
+
+不依赖下一次迭代是否发生
+
+5) 你可能还关心：yield 前后分别代表什么语义？
+yield 前适合做什么？
+
+“准备输出之前的事情”
+
+取数据、校验、记录日志、打点、做转换
+
+yield 后适合做什么？
+
+“这一条已经成功交给消费者之后才做的事情”
+
+比如你真的想确认“消费者已经请求下一条了”才算“上一条完成”，才放到 yield 后
+
+但注意：SSE/网络流不保证真正送达，yield 只是把数据交给框架，不能严格代表“客户端已收到”。
+
+
+**解决**
+- 先取再 log 再 yield：
+  - `ev = await q.get(); logger.info(...); yield ev`
+- 保证 `_attach_trace()` 任意路径都返回 dict（不要返回 None）
+- 统一使用 `uvicorn --log-config log_config.json` 把应用日志落盘到 `logs/agentlab.log`
+- 明确调试路径：
+  1) 开 SSE 订阅终端
+  2) 另开终端 POST /react_chat 触发 publish
+
+---
+
+## 3. 本日完成的事情（落地成果）
+
+### 3.1 完成 OTel 初始化（setup_otel）与落盘 trace 文件
+- 将默认 `ConsoleSpanExporter`（刷屏）替换为 **JSONL 文件 exporter**
+- 产物：`logs/traces.jsonl`（每行一条 span，便于搜索/过滤/脚本处理）
+- 可选：若设置 `OTEL_EXPORTER_OTLP_ENDPOINT`，仍可走 OTLP 导出
+
+> 备注：调试期更适合“写文件 + 过滤噪声”，而不是采样（sampling 可能丢掉关键 trace）。
+
+---
+
+### 3.2 把 trace_id/span_id 附加到 SSE runtime events
+- 在 `EventBus.publish()` 内：`await q.put(self._attach_trace(event))`
+- SSE 端最终输出效果：每条业务 event dict 携带
+  - `"trace_id": "...", "span_id": "..."`
+- 价值：可以把 SSE 的每个 runtime event 精确对应到某个 span（更快定位 “哪一步” 卡住或异常）。
+
+---
+
+### 3.3 验证 trace 与 SSE 的对应关系（对齐方法）
+- 使用 SSE 输出的 `trace_id`：在 `traces.jsonl` 中筛选同 trace 的所有 spans
+- 用 `span_id` 在 trace 文件中精确查某个 span
+- 用 `parent_span_id` 串起树结构：
+  - HTTP POST /react_chat（root）
+    - agent.run
+      - react.step#1
+        - tool.run sleep
+      - react.step#2
+        - tool.run now
+      - react.step#3
+- 对齐耗时：
+  - trace 的 `(end-start)/1e6` ≈ SSE 中 `duration_ms`（例如 sleep 约 4013ms）
+
+---
+
+### 3.4 产出辅助脚本：按 trace_id 打印树状链路（trace_tree.py）
+- 输入 `trace_id`，输出树结构 + 每个 span 耗时（ms）+ step/tool 信息
+- 用于快速从海量 spans 中抽出“本次请求”的关键链路，替代肉眼看 JSONL。
+
+---
+
+## 4. 本日关键知识点（简明版）
+
+- **Tracer**：创建 span 的“句柄/工具对象”（不会每次请求都新建）
+- **Trace**：一次请求/一次任务的整条链路（一个 trace_id）
+- **Span**：链路中的一个步骤节点（span_id），通过 parent_span_id 构成树
+- **埋点/Instrumentation**：在关键代码处创建 span、记录属性、异常、耗时
+- **SSE**：长连接流式推送，容易产生大量 http.response.body 类 spans（噪声来源）
+- **对齐思路**：在发布业务事件时附加当前 span 的 trace_id/span_id → 事件与链路可互相跳转
+
+---
+
+## 5. 后续建议（下一步）
+
+1. **过滤噪声 spans（强烈推荐）**
+   - 在 exporter 中丢弃 `/events` 路由产生的 `http.response.body` 等 spans
+2. **把 ERROR 变得可读**
+   - 在捕获异常处：`span.record_exception(e)` + `span.set_status(ERROR)`
+3. **统一日志落盘**
+   - 全部 print → logging；uvicorn/fastapi 统一写入 `logs/agentlab.log`
+4. **接入可视化后端（可选）**
+   - 本地：Jaeger / Tempo（通过 OTLP 导出）
+   - LLM 专用：Langfuse / Arize（对 prompt、tool、cost 更友好）
+
+---
+
+## 6. 文件与命令（备忘）
+
+- trace 文件：`logs/traces.jsonl`
+- 应用日志：`logs/agentlab.log`
+- 启动（带日志配置）：
+  - `uvicorn agentlab.app:app --port 8000 --log-config log_config.json`
+- SSE 订阅：
+  - `curl.exe -N http://127.0.0.1:8000/session/test/events`
+- 触发请求：
+  - `Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/session/test/react_chat" -ContentType "application/json" -Body (@{prompt="...";system="..."} | ConvertTo-Json)`

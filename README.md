@@ -18,7 +18,7 @@ Project structure for Agentlab based on modern Python standards.
 ```bash
 pip install fastapi uvicorn
 pip install -e .
-# 启动fastapi服务，--reload 表示热更新，--port 指定端口
+# 启动fastapi服务，--reload 表示热更新，--port 指定端口，--log-config 指定日志配置
 uvicorn agentlab.app:app --port 8000 --log-config log_config.json  
 # 启动sse事件，可以看到事件流
 curl.exe -N http://127.0.0.1:8000/session/test/events
@@ -73,7 +73,7 @@ $json = @{
 } | ConvertTo-Json
 
 Invoke-RestMethod -Method Post `
-  -Uri "http://127.0.0.1:8000/session/newtest/react_chat" `
+  -Uri "http://127.0.0.1:8000/session/test/react_chat" `
   -ContentType "application/json; charset=utf-8" `
   -Body ([System.Text.Encoding]::UTF8.GetBytes($json))
 ```
@@ -195,3 +195,44 @@ $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 - SSE `data` 统一输出为 JSON 字符串，是后续 Studio/UI/日志/评估对接的最佳实践。
 - 中文与结构化数据的可观测性显著提升：`react_user_input` 能直接确认服务端收到的 prompt/system 是否正确。
+
+
+# Day 8 — Observabilit：OTel Tracing + SSE 事件携带 trace_id/span_id
+目标
+
+接入 OpenTelemetry Tracing，能看到一次请求的链路：HTTP → agent.run → react.step → tool.run
+
+把 trace_id / span_id 附加到 SSE runtime events，做到 SSE ↔ Trace 文件可对齐
+
+解决终端刷屏：把 spans 落盘为 logs/traces.jsonl，便于 grep/脚本分析
+
+## 核心概念（最少必懂）
+
+trace：一次请求/一次任务的完整链路（同一个 trace_id）
+
+span：链路中的一步（一个 span_id），通过 parent_span_id 形成树
+
+tracer：创建 span 的“句柄对象”（不会每次请求重新创建；每次请求会产生新的 trace/span）
+
+## 我做了什么（产出）
+
+OTel 初始化：把 span 导出到文件（JSONL），避免 Console exporter 刷屏
+
+输出：logs/traces.jsonl
+
+SSE runtime events 附加 trace 信息
+
+在 EventBus.publish() 中用 trace.get_current_span() 读取当前 span，把 trace_id/span_id 写入事件 dict（copy 后再 put）
+
+上下文传播（重点）：后台任务保持同一条 trace
+
+在 react_chat 的 job 内使用：attach(parent_ctx) / detach(token)
+
+否则后台 publish 时 get_current_span() 可能是无效 span，SSE 就拿不到 trace_id/span_id
+
+辅助脚本：按 trace_id 抽取并打印树状链路
+
+用于快速从 JSONL 里看到一次请求的 span 树 + 耗时
+```
+python src\agentlab\tools\trace_tree.py --trace-id <trace_id>
+```
