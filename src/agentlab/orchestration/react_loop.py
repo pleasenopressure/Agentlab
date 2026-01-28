@@ -79,6 +79,7 @@ async def run_react(
     - tool -> 执行 -> observation 回灌
     - final -> 返回答案
     """
+    # system prompt 是“执行协议”，工具与约束会变，所以每次都要以最新契约启动，不依赖旧会话里可能过时的 system。
     system_prompt = build_react_system_prompt(registry)
     if user_system:
         # 用户 system 作为附加要求（如“用中文回答”）
