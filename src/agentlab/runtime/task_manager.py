@@ -23,6 +23,10 @@ class TaskManager:
         self._tasks: Dict[str, TaskRecord] = {}
 
     def start(self, session_id: str, coro_factory: Callable[[CancellationToken], Awaitable[None]]) -> str:
+        # 简单理解 callable 表示这是一个可调用对象（如函数、lambda、或实现了 __call__ 的类）
+        # coro_factory 是一个协程工厂函数，它：
+        # 接收一个 CancellationToken 参数
+        # 返回一个异步协程（async def 定义的函数返回的对象）
         # 如果已有运行中的任务，先拒绝或先取消再重启（这里选择拒绝，更安全）
         if session_id in self._tasks and self._tasks[session_id].status == "running":
             return "already_running"

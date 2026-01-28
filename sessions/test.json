@@ -46,5 +46,81 @@
   {
     "role": "assistant",
     "content": ""
+  },
+  {
+    "role": "user",
+    "content": "请等待 4 秒后告诉我现在的时间戳（可以使用工具）"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"tool\",\"tool_name\":\"sleep\",\"args\":{\"seconds\":4}}"
+  },
+  {
+    "role": "user",
+    "content": "Observation: {\"ok\": true, \"tool\": \"sleep\", \"output\": {\"ok\": true, \"tool\": \"sleep\", \"result\": {\"slept\": 4.0}, \"attempt\": 1}}"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"tool\",\"tool_name\":\"now\",\"args\":{}}"
+  },
+  {
+    "role": "user",
+    "content": "Observation: {\"ok\": true, \"tool\": \"now\", \"output\": {\"ok\": true, \"tool\": \"now\", \"result\": {\"unix\": 1769442921.600924}, \"attempt\": 1}}"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"当前的时间戳是 1769442921.600924。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "role": "user",
+    "content": "请等待 4 秒后告诉我现在的时间戳（可以使用工具）"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"tool\",\"tool_name\":\"sleep\",\"args\":{\"seconds\":4}}"
+  },
+  {
+    "role": "user",
+    "content": "Observation: {\"ok\": true, \"tool\": \"sleep\", \"output\": {\"ok\": true, \"tool\": \"sleep\", \"result\": {\"slept\": 4.0}, \"attempt\": 1}}"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"tool\",\"tool_name\":\"now\",\"args\":{}}"
+  },
+  {
+    "role": "user",
+    "content": "Observation: {\"ok\": true, \"tool\": \"now\", \"output\": {\"ok\": true, \"tool\": \"now\", \"result\": {\"unix\": 1769467253.3724346}, \"attempt\": 1}}"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"当前的时间戳是 1769467253.3724346。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "role": "user",
+    "content": "10*16/20+8等於多少（可以使用工具）"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"tool\",\"tool_name\":\"calc\",\"args\":{\"expression\":\"10*16/20+8\"}}"
+  },
+  {
+    "role": "user",
+    "content": "Observation: {\"ok\": true, \"tool\": \"calc\", \"output\": {\"ok\": true, \"tool\": \"calc\", \"result\": {\"expression\": \"10*16/20+8\", \"value\": 16.0}, \"attempt\": 1}}"
+  },
+  {
+    "role": "assistant",
+    "content": "{\"type\":\"final\",\"final\":\"10*16/20+8 等于 16.0。\"}"
+  },
+  {
+    "role": "assistant",
+    "content": ""
   }
 ]

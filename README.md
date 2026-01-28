@@ -76,7 +76,7 @@ Invoke-RestMethod -Method Post `
   -Uri "http://127.0.0.1:8000/session/test/react_chat" `
   -ContentType "application/json; charset=utf-8" `
   -Body ([System.Text.Encoding]::UTF8.GetBytes($json))
-```
+
 
 # Day7 — SSE 输出标准化为 JSON（UTF-8）
 
